@@ -293,12 +293,10 @@ bool TUYAMCU_SendFromQueue() {
 	toUse = tm_sendPackets;
 	tm_sendPackets = toUse->next;
 
-	UART_SendByte(0x55);
-	UART_SendByte(0xAA);
-	UART_SendByte(0x00);
-	for (int i = 0; i < toUse->size; i++) {
+	for (int i = 0; i < toUse->size; i++)
 		UART_SendByte(toUse->data[i]);
-	}
+
+	TuyaMCU_PrintSentPacket(toUse->data, toUse->size);
 
 	toUse->next = tm_emptyPackets;
 	tm_emptyPackets = toUse;
@@ -435,41 +433,42 @@ int UART_TryToGetNextTuyaPacket(byte* out, int maxSize) {
 	return 0;
 }
 
-
-
 // append header, len, everything, checksum
 void TuyaMCU_SendCommandWithData(byte cmdType, byte* data, int payload_len) {
 	int i;
-	
+	byte *packet;
+	bool queueEnabled = CFG_HasFlag(OBK_FLAG_TUYAMCU_USE_QUEUE);
 	byte check_sum = (0xFF + cmdType + (payload_len >> 8) + (payload_len & 0xFF));
+	int size = payload_len + 7;
 
 	UART_InitUART(g_baudRate, 0, false);
-	if (CFG_HasFlag(OBK_FLAG_TUYAMCU_USE_QUEUE)) {
-		tuyaMCUPacket_t *p = TUYAMCU_AddToQueue(payload_len + 4);
-		p->data[0] = cmdType;
-		p->data[1] = payload_len >> 8;
-		p->data[2] = payload_len & 0xFF;
-		memcpy(p->data + 3, data, payload_len);
-		for (i = 0; i < payload_len; i++) {
-			byte b = data[i];
-			check_sum += b;
-		}
-		p->data[3+payload_len] = check_sum;
+	if (queueEnabled) {
+		tuyaMCUPacket_t *p = TUYAMCU_AddToQueue(size);
+		packet = p->data;
+	} else {
+		packet = malloc(size);
 	}
-	else {
-		UART_SendByte(0x55);
-		UART_SendByte(0xAA);
-		UART_SendByte(0x00);         // version 00
-		UART_SendByte(cmdType);         // version 00
-		UART_SendByte(payload_len >> 8);      // following data length (Hi)
-		UART_SendByte(payload_len & 0xFF);    // following data length (Lo)
-		for (i = 0; i < payload_len; i++) {
-			byte b = data[i];
-			check_sum += b;
-			UART_SendByte(b);
-		}
-		UART_SendByte(check_sum);
+
+	packet[0] = 0x55;
+	packet[1] = 0xAA;
+	packet[2] = 0x00;				// version 0
+	packet[4] = cmdType;
+	packet[5] = payload_len >> 8;	// following data length (Hi)
+	packet[6] = payload_len & 0xFF;	// following data length (Lo)
+	memcpy(packet + 6, data, payload_len);
+	for (i = 0; i < payload_len; i++) {
+		byte b = data[i];
+		check_sum += b;
 	}
+	p->data[6 + payload_len] = check_sum;
+
+	if (!queueEnabled) {
+		for (int i = 0; i < size; i++)
+			UART_SendByte(packet[i]);
+		TuyaMCU_PrintSentPacket(packet, size);
+		free(packet);
+	}
+
 }
 int TuyaMCU_AppendStateInternal(byte *buffer, int bufferMax, int currentLen, uint8_t id, int8_t type, void* value, int dataLen) {
 	if (currentLen + 4 + dataLen >= bufferMax) {
@@ -786,6 +785,7 @@ void TuyaMCU_Send_RawBuffer(byte* data, int len) {
 	for (i = 0; i < len; i++) {
 		UART_SendByte(data[i]);
 	}
+	TuyaMCU_PrintSentPacket(data, len);
 }
 //battery-powered water sensor with TyuaMCU request to get somo response
 // uartSendHex 55AA0001000000 - this will get reply:
@@ -2142,6 +2142,18 @@ void TuyaMCU_RunWiFiUpdateAndPackets() {
 		wifi_state_timer = 0;
 		//addLogAdv(LOG_INFO, LOG_FEATURE_TUYAMCU,"Wifi_State timer");
 	}
+}
+void TuyaMCU_PrintSentPacket(byte *data, int len) {
+	int i;
+	char buffer_for_log[256];
+	char buffer2[4];
+
+	buffer_for_log[0] = 0;
+	for (i = 0; i < len; i++) {
+		snprintf(buffer2, sizeof(buffer2), "%02X ", data[i]);
+		strcat_safe(buffer_for_log, buffer2, sizeof(buffer_for_log));
+	}
+	addLogAdv(LOG_INFO, LOG_FEATURE_TUYAMCU, "Sent: %s\n", buffer_for_log);
 }
 void TuyaMCU_PrintPacket(byte *data, int len) {
 	int i;
